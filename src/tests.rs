@@ -152,3 +152,151 @@ fn test_augmented_script_set_fmt_display() {
         assert_eq!(format!("{}", ss), output);
     }
 }
+
+#[test]
+fn test_mixed_script_confusable_spoofing_is_flagged() {
+    use crate::is_mixed_script_confusable;
+    use crate::mixed_script_confusable::MixedScriptConfusableDetection;
+    use crate::MixedScript;
+    use unicode_script::Script;
+
+    // "pаypаl" swaps Latin `a` for Cyrillic U+0430 while keeping the same
+    // skeleton as "paypal".
+    let spoof = "pаypаl";
+    assert!(!spoof.is_single_script());
+    assert!(is_mixed_script_confusable(spoof));
+
+    let report = spoof.mixed_script_confusable();
+    assert!(report.is_mixed_script_confusable());
+    assert!(report.resolved_script_set().is_empty());
+    assert!(!report.has_restricted_character());
+    assert_eq!(report.restricted_characters().next(), None);
+    assert_eq!(report.uncovered_characters().next(), None);
+
+    let hits: std::vec::Vec<_> = report.confusable_chars().collect();
+    assert_eq!(hits.len(), 2);
+    assert_eq!(hits[0].char, 'а');
+    assert_eq!(hits[0].index, 1);
+    assert_eq!(hits[0].source_script, Script::Cyrillic);
+    assert_eq!(hits[0].target_char, 'a');
+    assert_eq!(hits[0].target_script, Script::Latin);
+    assert_ne!(hits[0].source_script, hits[0].target_script);
+    assert_eq!(hits[1].index, 5);
+
+    // The skeleton collapses the spoof back to plain ASCII.
+    let mut skeleton = report.skeleton();
+    assert_eq!(skeleton.next(), Some('p'));
+    assert_eq!(skeleton.collect::<std::string::String>(), "aypal");
+
+    // A Latin/Cyrillic mixture inside "Сirсlе" (Table 1a of UTS #39) is
+    // flagged, including Cyrillic es and ie.
+    let circle = "Сirсlе";
+    assert!(is_mixed_script_confusable(circle));
+    let circle_hits: std::vec::Vec<_> = circle
+        .mixed_script_confusable()
+        .confusable_chars()
+        .collect();
+    assert!(circle_hits.iter().any(|hit| hit.char == 'С'
+        && hit.source_script == Script::Cyrillic
+        && hit.target_script == Script::Latin));
+    assert!(circle_hits
+        .iter()
+        .all(|hit| hit.source_script != hit.target_script));
+}
+
+#[test]
+fn test_mixed_script_confusable_legitimate_cjk_is_not_flagged() {
+    use crate::is_mixed_script_confusable;
+    use crate::mixed_script_confusable::MixedScriptConfusableDetection;
+    use crate::MixedScript;
+
+    // Ordinary Japanese Han/Hiragana/Katakana writing is single-script once
+    // augmented with Jpan, even though the raw Script properties differ.
+    for legitimate in &["冬の雪", "今日は", "カフェ", "日出은", "幻ㄒㄧㄤ"] {
+        assert!(
+            legitimate.is_single_script(),
+            "expected single-script: {}",
+            legitimate
+        );
+        assert!(
+            !is_mixed_script_confusable(legitimate),
+            "unexpected confusable verdict: {}",
+            legitimate
+        );
+        let report = legitimate.mixed_script_confusable();
+        assert!(!report.resolved_script_set().is_empty());
+        // Character-level cross-script lookalikes (e.g. Katakana `カ` with
+        // Han prototype `力`) can still exist; they never turn a
+        // single-script string into a whole-string mixed-script confusable.
+        assert!(!report.is_mixed_script_confusable());
+    }
+
+    // A genuinely mixed CJK string still must not be reported as a
+    // mixed-script *confusable*; restricted Bopomofo characters make it
+    // ineligible and are exposed as audit evidence.
+    let mixed = "夏の幻ㄒㄧㄤ";
+    assert!(!mixed.is_single_script());
+    assert!(!is_mixed_script_confusable(mixed));
+    let report = mixed.mixed_script_confusable();
+    assert!(report.has_restricted_character());
+    let restricted: std::vec::Vec<_> = report.restricted_characters().collect();
+    assert_eq!(restricted, vec![(9, 'ㄒ'), (12, 'ㄧ'), (15, 'ㄤ')]);
+}
+
+#[test]
+fn test_mixed_script_confusable_other_negatives() {
+    use crate::is_mixed_script_confusable;
+    use crate::mixed_script_confusable::MixedScriptConfusableDetection;
+    use crate::MixedScript;
+    use unicode_script::Script;
+
+    // Single-script strings, including whole-script lookalikes, are not
+    // *mixed-script* confusables even when their skeleton matches another
+    // script.
+    for single_script in &["paypal", "scope", "ѕсоре", "раураӏ", "Circ1e", ""] {
+        assert!(single_script.is_single_script());
+        assert!(!is_mixed_script_confusable(single_script));
+        assert!(!single_script
+            .mixed_script_confusable()
+            .resolved_script_set()
+            .is_empty());
+    }
+
+    // A mixed-script string containing a character without a cross-script
+    // prototype cannot be fully substituted and is therefore not confusable.
+    let uncovered = "ЁA";
+    assert!(!uncovered.is_single_script());
+    assert!(!is_mixed_script_confusable(uncovered));
+    let report = uncovered.mixed_script_confusable();
+    assert!(!report.has_restricted_character());
+    assert_eq!(
+        report.uncovered_characters().collect::<std::vec::Vec<_>>(),
+        vec![(0, 'Ё', Script::Cyrillic)]
+    );
+
+    // Restricted characters (here U+00B5 MICRO SIGN) disqualify the string
+    // from identifier-based detection regardless of the skeleton.
+    let restricted = "µа";
+    assert!(!is_mixed_script_confusable(restricted));
+    let report = restricted.mixed_script_confusable();
+    assert!(report.has_restricted_character());
+    assert_eq!(
+        report.restricted_characters().collect::<std::vec::Vec<_>>(),
+        vec![(0, 'µ')]
+    );
+}
+
+#[test]
+fn test_mixed_script_confusable_common_and_inherited_are_ignored() {
+    use crate::is_mixed_script_confusable;
+    use crate::mixed_script_confusable::MixedScriptConfusableDetection;
+
+    // Digits and punctuation are Common characters without a script of their
+    // own; a single-script Latin label containing them stays clean.
+    let label = "Abc123.";
+    assert!(!is_mixed_script_confusable(label));
+    let report = label.mixed_script_confusable();
+    assert!(!report.resolved_script_set().is_empty());
+    assert_eq!(report.confusable_chars().next(), None);
+    assert_eq!(report.uncovered_characters().next(), None);
+}

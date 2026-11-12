@@ -61,12 +61,17 @@ pub use tables::UNICODE_VERSION;
 pub mod confusable_detection;
 pub mod general_security_profile;
 pub mod mixed_script;
+pub mod mixed_script_confusable;
 pub mod restriction_level;
 
 pub use confusable_detection::skeleton;
 pub use general_security_profile::GeneralSecurityProfile;
 pub use mixed_script::is_potential_mixed_script_confusable_char;
 pub use mixed_script::MixedScript;
+pub use mixed_script_confusable::is_mixed_script_confusable;
+pub use mixed_script_confusable::ConfusableChar;
+pub use mixed_script_confusable::MixedScriptConfusableDetection;
+pub use mixed_script_confusable::MixedScriptConfusableReport;
 pub use restriction_level::{RestrictionLevel, RestrictionLevelDetection};
 
 #[rustfmt::skip]
